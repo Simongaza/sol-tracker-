@@ -1,36 +1,40 @@
-import TelegramBot from 'node-telegram-bot-api';
-import { Connection, PublicKey } from '@solana/web3.js';
-import http from 'http'; // Added to keep Render happy
-import dotenv from 'dotenv';
+const TelegramBot = require('node-telegram-bot-api');
+const { Connection, PublicKey } = require('@solana/web3.js');
+const http = require('http');
+require('dotenv').config();
 
-dotenv.config();
-
-// --- DUMMY SERVER FOR RENDER (Keeps the service alive on Free Tier) ---
+// ==========================================
+// 1. DUMMY SERVER FOR RENDER (Keeps Free Tier Alive)
+// ==========================================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Solana Tracker Bot is Running!\n');
+    res.end('Solana Tracker Bot is running!\n');
 }).listen(PORT, '0.0.0.0', () => {
-    console.log(`📡 Port binding successful on port ${PORT}`);
+    console.log(`📡 Port bound successfully on port ${PORT}`);
 });
 
-// --- Configuration (Defaults to your exact credentials) ---
+// ==========================================
+// 2. CONFIGURATION & CREDENTIALS
+// ==========================================
 const botToken = process.env.TELEGRAM_BOT_TOKEN || '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = process.env.TELEGRAM_CHAT_ID || '7113872351';
 const targetWalletAddress = process.env.TARGET_WALLET || '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd';
 const wssUrl = process.env.HELIUS_WSS_URL || 'wss://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
-// Initialize Telegram Bot
+// ==========================================
+// 3. INITIALIZATION
+// ==========================================
 const bot = new TelegramBot(botToken, { polling: false });
-
-// Initialize Solana WebSocket Connection
 const connection = new Connection(wssUrl, 'confirmed');
 const targetPublicKey = new PublicKey(targetWalletAddress);
 
-console.log(`🚀 Tracking started for: ${targetWalletAddress}`);
+console.log(`🚀 Tracking started for wallet: ${targetWalletAddress}`);
 console.log(`📡 Connected to Helius WebSocket...`);
 
-// Monitor transactions in real-time
+// ==========================================
+// 4. REAL-TIME BLOCKCHAIN LISTENER
+// ==========================================
 connection.onLogs(
     targetPublicKey,
     async (logs, context) => {
@@ -38,7 +42,7 @@ connection.onLogs(
             const signature = logs.signature;
             if (!signature) return;
 
-            console.log(`✨ New activity detected! Signature: ${signature}`);
+            console.log(`✨ Activity detected! Tx: ${signature}`);
 
             const solscanUrl = `https://solscan.io/tx/${signature}`;
             const alertMessage = `
@@ -57,7 +61,7 @@ connection.onLogs(
             
             console.log(`✅ Alert successfully sent to Telegram!`);
         } catch (error) {
-            console.error('❌ Error handling transaction log:', error);
+            console.error('❌ Error executing transaction alert:', error);
         }
     },
     'confirmed'
