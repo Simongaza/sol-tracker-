@@ -1,7 +1,6 @@
 {
   "name": "sol-tracker",
   "version": "1.0.0",
-  "type": "module",
   "main": "bot.js",
   "dependencies": {
     "node-telegram-bot-api": "^0.66.0",
