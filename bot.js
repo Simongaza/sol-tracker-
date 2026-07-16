@@ -14,7 +14,7 @@ http.createServer((req, res) => {
 });
 
 // ==========================================
-// 2. HARDCODED CONFIGURATION (No Env Vars Needed!)
+// 2. HARDCODED CONFIGURATION
 // ==========================================
 const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
@@ -26,23 +26,50 @@ const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-
 // 3. INITIALIZATION
 // ==========================================
 const bot = new TelegramBot(botToken, { polling: false });
-// Using HTTP RPC for fetching tx details and WebSocket for logs
 const connection = new Connection(rpcUrl, {
     commitment: 'confirmed',
     wsEndpoint: wssUrl
 });
 const targetPublicKey = new PublicKey(targetWalletAddress);
 
-console.log(`🚀 Tracking started for wallet: ${targetWalletAddress}`);
-console.log(`📡 Connected to Helius nodes...`);
+console.log(`🚀 Advanced Tracking started for wallet: ${targetWalletAddress}`);
 
-// Helper function to format large numbers (e.g., 171660000 -> 171.66M)
+// Helper function to format large numbers
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
     if (absAmount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
     if (absAmount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
     if (absAmount >= 1e3) return `${(amount / 1e3).toFixed(2)}K`;
-    return amount.toFixed(2);
+    return amount.toFixed(4);
+}
+
+// Function to fetch Token Name from Mint Address using Helius DAS API
+async function getTokenMetadata(mintAddress) {
+    if (!mintAddress || mintAddress === "Unknown" || mintAddress === "SOL") {
+        return { name: "Solana", symbol: "SOL" };
+    }
+    try {
+        const response = await fetch(rpcUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 'token-name-lookup',
+                method: 'getAsset',
+                params: { id: mintAddress }
+            })
+        });
+        const { result } = await response.json();
+        if (result && result.content && result.content.metadata) {
+            return {
+                name: result.content.metadata.name || "Unknown Token",
+                symbol: result.content.metadata.symbol || "UNKNOWN"
+            };
+        }
+    } catch (e) {
+        console.error("❌ Failed to fetch token metadata:", e);
+    }
+    return { name: "Unknown Token", symbol: "UNKNOWN" };
 }
 
 // ==========================================
@@ -57,10 +84,9 @@ connection.onLogs(
 
             console.log(`✨ Activity detected! Fetching transaction details...`);
 
-            // Wait 1.5 seconds to make sure the transaction is fully indexed on-chain
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            // Wait 2 seconds to ensure the block transaction is fully indexed
+            await new Promise(resolve => setTimeout(resolve, 2000));
 
-            // Fetch transaction details
             const tx = await connection.getParsedTransaction(signature, {
                 commitment: 'confirmed',
                 maxSupportedTransactionVersion: 0
@@ -71,15 +97,28 @@ connection.onLogs(
                 return;
             }
 
+            // Track changes in Native SOL
+            const postBalancesSol = tx.meta.postBalances || [];
+            const preBalancesSol = tx.meta.preBalances || [];
+            
+            // Find account index of our target wallet in this transaction
+            const accountKeys = tx.transaction.message.accountKeys.map(k => k.pubkey ? k.pubkey.toString() : k.toString());
+            const targetIndex = accountKeys.indexOf(targetWalletAddress);
+
+            let solChange = 0;
+            if (targetIndex !== -1) {
+                const preSol = preBalancesSol[targetIndex] || 0;
+                const postSol = postBalancesSol[targetIndex] || 0;
+                solChange = (postSol - preSol) / 1e9; // Convert lamports to SOL
+            }
+
+            // Track Token changes (SPL Tokens)
             const preBalances = tx.meta.preTokenBalances || [];
             const postBalances = tx.meta.postTokenBalances || [];
 
             let tokenMint = "Unknown";
             let tokenAmountChange = 0;
-            let actionType = "TRANSACTION";
-            let actionEmoji = "⚡";
 
-            // Find token changes for the target wallet (ignoring Wrapped SOL)
             postBalances.forEach(post => {
                 if (post.owner === targetWalletAddress && post.mint !== 'So11111111111111111111111111111111111111112') {
                     const pre = preBalances.find(p => p.mint === post.mint && p.owner === targetWalletAddress);
@@ -93,50 +132,81 @@ connection.onLogs(
                 }
             });
 
-            // If the token was completely sold out
             if (tokenAmountChange === 0) {
                 preBalances.forEach(pre => {
                     if (pre.owner === targetWalletAddress && pre.mint !== 'So11111111111111111111111111111111111111112') {
                         const post = postBalances.find(p => p.mint === pre.mint && p.owner === targetWalletAddress);
                         if (!post) {
                             tokenMint = pre.mint;
-                            tokenAmountChange = -pre.uiTokenAmount.uiAmount; // Negative change = Sell
+                            tokenAmountChange = -pre.uiTokenAmount.uiAmount;
                         }
                     }
                 });
             }
 
-            // Determine if Buy or Sell
-            if (tokenAmountChange > 0) {
-                actionType = "BUY DETECTED";
-                actionEmoji = "🟢";
-            } else if (tokenAmountChange < 0) {
-                actionType = "SELL DETECTED";
-                actionEmoji = "🔴";
+            // Determine if it's a Token movement or native SOL movement
+            let actionType = "TRANSACTION";
+            let actionEmoji = "⚡";
+            let displayAmount = "0.00";
+            let tokenName = "Unknown";
+            let tokenSymbol = "";
+            let targetMintOutput = tokenMint;
+
+            if (tokenAmountChange !== 0) {
+                // Fetch real token metadata
+                const meta = await getTokenMetadata(tokenMint);
+                tokenName = meta.name;
+                tokenSymbol = meta.symbol;
+
+                displayAmount = `${formatAmount(tokenAmountChange)} ${tokenSymbol}`;
+                if (tokenAmountChange > 0) {
+                    actionType = "BUY DETECTED";
+                    actionEmoji = "🟢";
+                } else {
+                    actionType = "SELL DETECTED";
+                    actionEmoji = "🔴";
+                }
+            } else if (Math.abs(solChange) > 0.001) { // Filter out micro-SOL changes used for network fees
+                tokenName = "Solana";
+                tokenSymbol = "SOL";
+                targetMintOutput = "Native SOL Asset";
+                displayAmount = `${formatAmount(solChange)} SOL`;
+                if (solChange > 0) {
+                    actionType = "SOL RECEIVED";
+                    actionEmoji = "📥";
+                } else {
+                    actionType = "SOL SENT";
+                    actionEmoji = "📤";
+                }
+            } else {
+                // It was a non-movement interaction (like establishing/closing empty accounts)
+                console.log("ℹ️ Skipping zero-value network fee adjustment transaction.");
+                return;
             }
 
             const solscanUrl = `https://solscan.io/tx/${signature}`;
-            const dexscreenerUrl = `https://dexscreener.com/solana/${tokenMint}`;
+            const dexscreenerUrl = tokenMint !== "Unknown" ? `https://dexscreener.com/solana/${tokenMint}` : `https://dexscreener.com/solana/`;
 
-            // Build the detailed alert message
+            // Build formatting alert
             const alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
 👤 **Wallet:** \`${targetWalletAddress.substring(0, 6)}...${targetWalletAddress.substring(targetWalletAddress.length - 4)}\`
-🪙 **Amount:** \`${formatAmount(tokenAmountChange)}\` tokens
-💊 **Token CA:** \`${tokenMint}\`
+🪙 **Token:** **${tokenName}** ${tokenSymbol ? `(${tokenSymbol})` : ''}
+💰 **Amount:** \`${displayAmount}\`
+💊 **Token CA:** \`${targetMintOutput}\`
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
             `;
 
-            // Send notification to Telegram
+            // Send to Telegram
             await bot.sendMessage(chatID, alertMessage, { 
                 parse_mode: 'Markdown', 
                 disable_web_page_preview: true 
             });
             
-            console.log(`✅ ${actionType} alert sent successfully!`);
+            console.log(`✅ Sent alert for ${tokenName} (${displayAmount})`);
         } catch (error) {
             console.error('❌ Error executing transaction alert:', error);
         }
