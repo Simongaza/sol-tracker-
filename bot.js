@@ -34,7 +34,6 @@ const targetPublicKey = new PublicKey(targetWalletAddress);
 
 console.log(`🚀 Advanced Tracking started for wallet: ${targetWalletAddress}`);
 
-// Helper function to format large numbers
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
     if (absAmount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
@@ -43,7 +42,6 @@ function formatAmount(amount) {
     return amount.toFixed(4);
 }
 
-// Function to fetch Token Name from Mint Address using Helius DAS API
 async function getTokenMetadata(mintAddress) {
     if (!mintAddress || mintAddress === "Unknown" || mintAddress === "SOL") {
         return { name: "Solana", symbol: "SOL" };
@@ -100,8 +98,6 @@ connection.onLogs(
             // Track changes in Native SOL
             const postBalancesSol = tx.meta.postBalances || [];
             const preBalancesSol = tx.meta.preBalances || [];
-            
-            // Find account index of our target wallet in this transaction
             const accountKeys = tx.transaction.message.accountKeys.map(k => k.pubkey ? k.pubkey.toString() : k.toString());
             const targetIndex = accountKeys.indexOf(targetWalletAddress);
 
@@ -109,7 +105,7 @@ connection.onLogs(
             if (targetIndex !== -1) {
                 const preSol = preBalancesSol[targetIndex] || 0;
                 const postSol = postBalancesSol[targetIndex] || 0;
-                solChange = (postSol - preSol) / 1e9; // Convert lamports to SOL
+                solChange = (postSol - preSol) / 1e9;
             }
 
             // Track Token changes (SPL Tokens)
@@ -119,32 +115,30 @@ connection.onLogs(
             let tokenMint = "Unknown";
             let tokenAmountChange = 0;
 
-            postBalances.forEach(post => {
-                if (post.owner === targetWalletAddress && post.mint !== 'So11111111111111111111111111111111111111112') {
-                    const pre = preBalances.find(p => p.mint === post.mint && p.owner === targetWalletAddress);
-                    const preAmount = pre ? pre.uiTokenAmount.uiAmount : 0;
-                    const postAmount = post.uiTokenAmount.uiAmount;
-                    const change = postAmount - preAmount;
-                    if (change !== 0) {
-                        tokenMint = post.mint;
-                        tokenAmountChange = change;
-                    }
-                }
-            });
+            // Map all tokens involved for our target wallet
+            const targetTokens = new Set();
+            preBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
+            postBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
 
-            if (tokenAmountChange === 0) {
-                preBalances.forEach(pre => {
-                    if (pre.owner === targetWalletAddress && pre.mint !== 'So11111111111111111111111111111111111111112') {
-                        const post = postBalances.find(p => p.mint === pre.mint && p.owner === targetWalletAddress);
-                        if (!post) {
-                            tokenMint = pre.mint;
-                            tokenAmountChange = -pre.uiTokenAmount.uiAmount;
-                        }
-                    }
-                });
+            // Remove wrapped SOL from target token checks
+            targetTokens.delete('So11111111111111111111111111111111111111112');
+
+            // Calculate exact balance adjustments across all found tokens
+            for (const mint of targetTokens) {
+                const preObj = preBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
+                const postObj = postBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
+
+                const preAmount = preObj ? preObj.uiTokenAmount.uiAmount : 0;
+                const postAmount = postObj ? postObj.uiTokenAmount.uiAmount : 0;
+                const change = postAmount - preAmount;
+
+                if (change !== 0) {
+                    tokenMint = mint;
+                    tokenAmountChange = change;
+                    break; // Handle the primary altered token in this tx event
+                }
             }
 
-            // Determine if it's a Token movement or native SOL movement
             let actionType = "TRANSACTION";
             let actionEmoji = "⚡";
             let displayAmount = "0.00";
@@ -153,12 +147,11 @@ connection.onLogs(
             let targetMintOutput = tokenMint;
 
             if (tokenAmountChange !== 0) {
-                // Fetch real token metadata
                 const meta = await getTokenMetadata(tokenMint);
                 tokenName = meta.name;
                 tokenSymbol = meta.symbol;
-
                 displayAmount = `${formatAmount(tokenAmountChange)} ${tokenSymbol}`;
+
                 if (tokenAmountChange > 0) {
                     actionType = "BUY DETECTED";
                     actionEmoji = "🟢";
@@ -166,11 +159,12 @@ connection.onLogs(
                     actionType = "SELL DETECTED";
                     actionEmoji = "🔴";
                 }
-            } else if (Math.abs(solChange) > 0.001) { // Filter out micro-SOL changes used for network fees
+            } else if (Math.abs(solChange) > 0.005) { // Filter out standard transaction/gas fees
                 tokenName = "Solana";
                 tokenSymbol = "SOL";
                 targetMintOutput = "Native SOL Asset";
                 displayAmount = `${formatAmount(solChange)} SOL`;
+
                 if (solChange > 0) {
                     actionType = "SOL RECEIVED";
                     actionEmoji = "📥";
@@ -179,15 +173,13 @@ connection.onLogs(
                     actionEmoji = "📤";
                 }
             } else {
-                // It was a non-movement interaction (like establishing/closing empty accounts)
-                console.log("ℹ️ Skipping zero-value network fee adjustment transaction.");
+                console.log("ℹ️ Skipping minor network maintenance or non-asset movement log.");
                 return;
             }
 
             const solscanUrl = `https://solscan.io/tx/${signature}`;
             const dexscreenerUrl = tokenMint !== "Unknown" ? `https://dexscreener.com/solana/${tokenMint}` : `https://dexscreener.com/solana/`;
 
-            // Build formatting alert
             const alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
@@ -200,7 +192,6 @@ ${actionEmoji} **${actionType}!** ${actionEmoji}
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
             `;
 
-            // Send to Telegram
             await bot.sendMessage(chatID, alertMessage, { 
                 parse_mode: 'Markdown', 
                 disable_web_page_preview: true 
