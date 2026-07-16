@@ -10,11 +10,11 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Solana Tracker Bot is running!\n');
 }).listen(PORT, '0.0.0.0', () => {
-    console.log(`Port bound successfully on port ${PORT}`);
+    console.log(`📡 Port bound successfully on port ${PORT}`);
 });
 
 // ==========================================
-// 2. HARDCODED CONFIGURATION
+// 2. HARDCODED CONFIGURATION (No Env Vars Needed!)
 // ==========================================
 const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
@@ -32,18 +32,20 @@ const connection = new Connection(rpcUrl, {
 });
 const targetPublicKey = new PublicKey(targetWalletAddress);
 
-console.log(`Tracking started for wallet: ${targetWalletAddress}`);
+console.log(`🚀 Tracking started for wallet: ${targetWalletAddress}`);
+console.log(`📡 Connected to Helius nodes...`);
 
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
     if (absAmount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
     if (absAmount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
     if (absAmount >= 1e3) return `${(amount / 1e3).toFixed(2)}K`;
-    return amount.toFixed(4);
+    return amount.toFixed(2);
 }
 
+// Fetches real Token Names and Symbols instead of displaying "Unknown" or raw CAs
 async function getTokenMetadata(mintAddress) {
-    if (!mintAddress || mintAddress === "Unknown" || mintAddress === "SOL") {
+    if (!mintAddress || mintAddress === "Unknown" || mintAddress === "Native SOL Asset") {
         return { name: "Solana", symbol: "SOL" };
     }
     try {
@@ -65,7 +67,7 @@ async function getTokenMetadata(mintAddress) {
             };
         }
     } catch (e) {
-        console.error("Failed to fetch token metadata:", e);
+        console.error("❌ Failed to fetch token metadata:", e);
     }
     return { name: "Unknown Token", symbol: "UNKNOWN" };
 }
@@ -80,10 +82,9 @@ connection.onLogs(
             const signature = logs.signature;
             if (!signature) return;
 
-            console.log(`Activity detected! Fetching transaction details...`);
+            console.log(`✨ Activity detected! Fetching transaction details...`);
 
-            // Wait 2 seconds to ensure the block transaction is fully indexed
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 1500));
 
             const tx = await connection.getParsedTransaction(signature, {
                 commitment: 'confirmed',
@@ -91,89 +92,124 @@ connection.onLogs(
             });
 
             if (!tx || !tx.meta) {
-                console.log("Could not parse transaction metadata.");
+                console.log("⚠️ Could not parse transaction metadata.");
                 return;
             }
 
-            const movements = [];
-            let primaryTokenMint = "Unknown";
-
-            // 1. Calculate SOL Change
-            const postBalancesSol = tx.meta.postBalances || [];
-            const preBalancesSol = tx.meta.preBalances || [];
-            const accountKeys = tx.transaction.message.accountKeys.map(k => k.pubkey ? k.pubkey.toString() : k.toString());
-            const targetIndex = accountKeys.indexOf(targetWalletAddress);
-
-            if (targetIndex !== -1) {
-                const preSol = preBalancesSol[targetIndex] || 0;
-                const postSol = postBalancesSol[targetIndex] || 0;
-                const solChange = (postSol - preSol) / 1e9;
-
-                // Only record SOL if it is a real movement (ignoring tiny gas-only changes under 0.0005 SOL)
-                if (Math.abs(solChange) > 0.0005) {
-                    const direction = solChange > 0 ? "[+] RECEIVED" : "[-] SENT";
-                    movements.push(`${direction}: ${formatAmount(solChange)} SOL`);
-                }
-            }
-
-            // 2. Calculate Token Changes (SPL Tokens)
             const preBalances = tx.meta.preTokenBalances || [];
             const postBalances = tx.meta.postTokenBalances || [];
 
-            const targetTokens = new Set();
-            preBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
-            postBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
+            let tokenMint = "Unknown";
+            let tokenAmountChange = 0;
+            let actionType = "TRANSACTION";
+            let actionEmoji = "⚡";
 
-            // Remove wrapped SOL from target token checks to prevent double-counting
-            targetTokens.delete('So11111111111111111111111111111111111111112');
+            // 1. EXACT TOKEN CHECK (Your working logic)
+            postBalances.forEach(post => {
+                if (post.owner === targetWalletAddress && post.mint !== 'So11111111111111111111111111111111111111112') {
+                    const pre = preBalances.find(p => p.mint === post.mint && p.owner === targetWalletAddress);
+                    const preAmount = pre ? pre.uiTokenAmount.uiAmount : 0;
+                    const postAmount = post.uiTokenAmount.uiAmount;
+                    const change = postAmount - preAmount;
+                    if (change !== 0) {
+                        tokenMint = post.mint;
+                        tokenAmountChange = change;
+                    }
+                }
+            });
 
-            for (const mint of targetTokens) {
-                const preObj = preBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
-                const postObj = postBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
+            // 2. TOKEN SOLD OUT CHECK (Your working logic)
+            if (tokenAmountChange === 0) {
+                preBalances.forEach(pre => {
+                    if (pre.owner === targetWalletAddress && pre.mint !== 'So11111111111111111111111111111111111111112') {
+                        const post = postBalances.find(p => p.mint === pre.mint && p.owner === targetWalletAddress);
+                        if (!post) {
+                            tokenMint = pre.mint;
+                            tokenAmountChange = -pre.uiTokenAmount.uiAmount;
+                        }
+                    }
+                });
+            }
 
-                const preAmount = preObj ? preObj.uiTokenAmount.uiAmount : 0;
-                const postAmount = postObj ? postObj.uiTokenAmount.uiAmount : 0;
-                const change = postAmount - preAmount;
+            // 3. FALLBACK TO NATIVE SOL CHECK (If no SPL Token changed)
+            let isSolTx = false;
+            if (tokenAmountChange === 0) {
+                const postBalancesSol = tx.meta.postBalances || [];
+                const preBalancesSol = tx.meta.preBalances || [];
+                const accountKeys = tx.transaction.message.accountKeys.map(k => k.pubkey ? k.pubkey.toString() : k.toString());
+                const targetIndex = accountKeys.indexOf(targetWalletAddress);
 
-                if (change !== 0) {
-                    const meta = await getTokenMetadata(mint);
-                    const direction = change > 0 ? "[+] bought/received" : "[-] sold/sent";
-                    movements.push(`${direction}: ${formatAmount(change)} ${meta.symbol} (${meta.name})`);
-                    primaryTokenMint = mint; // Save the token mint for the DexScreener link
+                if (targetIndex !== -1) {
+                    const preSol = preBalancesSol[targetIndex] || 0;
+                    const postSol = postBalancesSol[targetIndex] || 0;
+                    const solChange = (postSol - preSol) / 1e9;
+
+                    // Filter out standard transaction fees (anything less than 0.005 SOL)
+                    if (Math.abs(solChange) > 0.005) {
+                        tokenAmountChange = solChange;
+                        tokenMint = "Native SOL Asset";
+                        isSolTx = true;
+                    }
                 }
             }
 
-            // If there are no actual asset movements (just minor network logs), skip
-            if (movements.length === 0) {
-                console.log("No significant asset movements detected in this transaction.");
+            // If no actual asset movement happened, quit early
+            if (tokenAmountChange === 0) {
+                console.log("ℹ️ Skipping non-asset movement log.");
                 return;
             }
 
-            // 3. Build plain text alert message (No custom fonts so it is easy to read/copy)
+            // Get token names instead of raw output
+            const meta = await getTokenMetadata(tokenMint);
+            const tokenName = meta.name;
+            const tokenSymbol = meta.symbol;
+
+            // Determine Action and Emojis
+            if (isSolTx) {
+                if (tokenAmountChange > 0) {
+                    actionType = "SOL RECEIVED";
+                    actionEmoji = "📥";
+                } else {
+                    actionType = "SOL SENT";
+                    actionEmoji = "📤";
+                }
+            } else {
+                if (tokenAmountChange > 0) {
+                    actionType = "BUY DETECTED";
+                    actionEmoji = "🟢";
+                } else {
+                    actionType = "SELL DETECTED";
+                    actionEmoji = "🔴";
+                }
+            }
+
             const solscanUrl = `https://solscan.io/tx/${signature}`;
-            const dexscreenerUrl = primaryTokenMint !== "Unknown" 
-                ? `https://dexscreener.com/solana/${primaryTokenMint}` 
+            const dexscreenerUrl = tokenMint !== "Native SOL Asset" 
+                ? `https://dexscreener.com/solana/${tokenMint}` 
                 : `https://dexscreener.com/solana/`;
 
+            const displayAmount = isSolTx ? `${formatAmount(tokenAmountChange)} SOL` : `${formatAmount(tokenAmountChange)} ${tokenSymbol}`;
+
             const alertMessage = `
-ALERT: WALLET MOVEMENT DETECTED
+${actionEmoji} **${actionType}!** ${actionEmoji}
 
-Wallet: ${targetWalletAddress}
+👤 **Wallet:** \`${targetWalletAddress.substring(0, 6)}...${targetWalletAddress.substring(targetWalletAddress.length - 4)}\`
+🪙 **Token:** **${tokenName}** ${tokenSymbol ? `(${tokenSymbol})` : ''}
+💰 **Amount:** \`${displayAmount}\`
+💊 **Token CA:** \`${tokenMint}\`
 
-Asset Changes:
-${movements.map(m => `* ${m}`).join('\n')}
-
-Solscan: ${solscanUrl}
-DexScreener: ${dexscreenerUrl}
+🔗 **Solscan:** [View Transaction](${solscanUrl})
+📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
             `;
 
             await bot.sendMessage(chatID, alertMessage, { 
+                parse_mode: 'Markdown', 
                 disable_web_page_preview: true 
             });
             
-            console.log(`Alert sent for transaction: ${signature}`);
+            console.log(`✅ ${actionType} alert sent successfully!`);
         } catch (error) {
-            console.error('Error executing transaction alert:', error);
+            console.error('❌ Error executing transaction alert:', error);
         }
     },
     'confirmed'
