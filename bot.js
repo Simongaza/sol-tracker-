@@ -1,7 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { Connection, PublicKey } = require('@solana/web3.js');
 const http = require('http');
-require('dotenv').config();
 
 // ==========================================
 // 1. DUMMY SERVER FOR RENDER (Keeps Free Tier Alive)
@@ -15,22 +14,27 @@ http.createServer((req, res) => {
 });
 
 // ==========================================
-// 2. CONFIGURATION & CREDENTIALS
+// 2. HARDCODED CONFIGURATION (No Env Vars Needed!)
 // ==========================================
-const botToken = process.env.TELEGRAM_BOT_TOKEN || '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
-const chatID = process.env.TELEGRAM_CHAT_ID || '7113872351';
-const targetWalletAddress = process.env.TARGET_WALLET || '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd';
-const wssUrl = process.env.HELIUS_WSS_URL || 'wss://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
+const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
+const chatID = '7113872351';
+const targetWalletAddress = '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd';
+const wssUrl = 'wss://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
+const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
 // ==========================================
 // 3. INITIALIZATION
 // ==========================================
 const bot = new TelegramBot(botToken, { polling: false });
-const connection = new Connection(wssUrl, 'confirmed');
+// Using HTTP RPC for fetching tx details and WebSocket for logs
+const connection = new Connection(rpcUrl, {
+    commitment: 'confirmed',
+    wsEndpoint: wssUrl
+});
 const targetPublicKey = new PublicKey(targetWalletAddress);
 
 console.log(`🚀 Tracking started for wallet: ${targetWalletAddress}`);
-console.log(`📡 Connected to Helius WebSocket...`);
+console.log(`📡 Connected to Helius nodes...`);
 
 // Helper function to format large numbers (e.g., 171660000 -> 171.66M)
 function formatAmount(amount) {
@@ -53,7 +57,7 @@ connection.onLogs(
 
             console.log(`✨ Activity detected! Fetching transaction details...`);
 
-            // Wait 1.5 seconds to make sure the transaction is fully processed and indexed on-chain
+            // Wait 1.5 seconds to make sure the transaction is fully indexed on-chain
             await new Promise(resolve => setTimeout(resolve, 1500));
 
             // Fetch transaction details
@@ -89,7 +93,7 @@ connection.onLogs(
                 }
             });
 
-            // If the token was completely sold out (meaning post-balance is gone/not listed)
+            // If the token was completely sold out
             if (tokenAmountChange === 0) {
                 preBalances.forEach(pre => {
                     if (pre.owner === targetWalletAddress && pre.mint !== 'So11111111111111111111111111111111111111112') {
@@ -114,7 +118,7 @@ connection.onLogs(
             const solscanUrl = `https://solscan.io/tx/${signature}`;
             const dexscreenerUrl = `https://dexscreener.com/solana/${tokenMint}`;
 
-            // Build the updated clean alert
+            // Build the detailed alert message
             const alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
