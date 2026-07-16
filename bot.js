@@ -10,7 +10,7 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Solana Tracker Bot is running!\n');
 }).listen(PORT, '0.0.0.0', () => {
-    console.log(`📡 Port bound successfully on port ${PORT}`);
+    console.log(`Port bound successfully on port ${PORT}`);
 });
 
 // ==========================================
@@ -32,7 +32,7 @@ const connection = new Connection(rpcUrl, {
 });
 const targetPublicKey = new PublicKey(targetWalletAddress);
 
-console.log(`🚀 Advanced Tracking started for wallet: ${targetWalletAddress}`);
+console.log(`Tracking started for wallet: ${targetWalletAddress}`);
 
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
@@ -65,7 +65,7 @@ async function getTokenMetadata(mintAddress) {
             };
         }
     } catch (e) {
-        console.error("❌ Failed to fetch token metadata:", e);
+        console.error("Failed to fetch token metadata:", e);
     }
     return { name: "Unknown Token", symbol: "UNKNOWN" };
 }
@@ -80,7 +80,7 @@ connection.onLogs(
             const signature = logs.signature;
             if (!signature) return;
 
-            console.log(`✨ Activity detected! Fetching transaction details...`);
+            console.log(`Activity detected! Fetching transaction details...`);
 
             // Wait 2 seconds to ensure the block transaction is fully indexed
             await new Promise(resolve => setTimeout(resolve, 2000));
@@ -91,39 +91,42 @@ connection.onLogs(
             });
 
             if (!tx || !tx.meta) {
-                console.log("⚠️ Could not parse transaction metadata.");
+                console.log("Could not parse transaction metadata.");
                 return;
             }
 
-            // Track changes in Native SOL
+            const movements = [];
+            let primaryTokenMint = "Unknown";
+
+            // 1. Calculate SOL Change
             const postBalancesSol = tx.meta.postBalances || [];
             const preBalancesSol = tx.meta.preBalances || [];
             const accountKeys = tx.transaction.message.accountKeys.map(k => k.pubkey ? k.pubkey.toString() : k.toString());
             const targetIndex = accountKeys.indexOf(targetWalletAddress);
 
-            let solChange = 0;
             if (targetIndex !== -1) {
                 const preSol = preBalancesSol[targetIndex] || 0;
                 const postSol = postBalancesSol[targetIndex] || 0;
-                solChange = (postSol - preSol) / 1e9;
+                const solChange = (postSol - preSol) / 1e9;
+
+                // Only record SOL if it is a real movement (ignoring tiny gas-only changes under 0.0005 SOL)
+                if (Math.abs(solChange) > 0.0005) {
+                    const direction = solChange > 0 ? "[+] RECEIVED" : "[-] SENT";
+                    movements.push(`${direction}: ${formatAmount(solChange)} SOL`);
+                }
             }
 
-            // Track Token changes (SPL Tokens)
+            // 2. Calculate Token Changes (SPL Tokens)
             const preBalances = tx.meta.preTokenBalances || [];
             const postBalances = tx.meta.postTokenBalances || [];
 
-            let tokenMint = "Unknown";
-            let tokenAmountChange = 0;
-
-            // Map all tokens involved for our target wallet
             const targetTokens = new Set();
             preBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
             postBalances.forEach(p => { if (p.owner === targetWalletAddress) targetTokens.add(p.mint); });
 
-            // Remove wrapped SOL from target token checks
+            // Remove wrapped SOL from target token checks to prevent double-counting
             targetTokens.delete('So11111111111111111111111111111111111111112');
 
-            // Calculate exact balance adjustments across all found tokens
             for (const mint of targetTokens) {
                 const preObj = preBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
                 const postObj = postBalances.find(p => p.mint === mint && p.owner === targetWalletAddress);
@@ -133,73 +136,44 @@ connection.onLogs(
                 const change = postAmount - preAmount;
 
                 if (change !== 0) {
-                    tokenMint = mint;
-                    tokenAmountChange = change;
-                    break; // Handle the primary altered token in this tx event
+                    const meta = await getTokenMetadata(mint);
+                    const direction = change > 0 ? "[+] bought/received" : "[-] sold/sent";
+                    movements.push(`${direction}: ${formatAmount(change)} ${meta.symbol} (${meta.name})`);
+                    primaryTokenMint = mint; // Save the token mint for the DexScreener link
                 }
             }
 
-            let actionType = "TRANSACTION";
-            let actionEmoji = "⚡";
-            let displayAmount = "0.00";
-            let tokenName = "Unknown";
-            let tokenSymbol = "";
-            let targetMintOutput = tokenMint;
-
-            if (tokenAmountChange !== 0) {
-                const meta = await getTokenMetadata(tokenMint);
-                tokenName = meta.name;
-                tokenSymbol = meta.symbol;
-                displayAmount = `${formatAmount(tokenAmountChange)} ${tokenSymbol}`;
-
-                if (tokenAmountChange > 0) {
-                    actionType = "BUY DETECTED";
-                    actionEmoji = "🟢";
-                } else {
-                    actionType = "SELL DETECTED";
-                    actionEmoji = "🔴";
-                }
-            } else if (Math.abs(solChange) > 0.005) { // Filter out standard transaction/gas fees
-                tokenName = "Solana";
-                tokenSymbol = "SOL";
-                targetMintOutput = "Native SOL Asset";
-                displayAmount = `${formatAmount(solChange)} SOL`;
-
-                if (solChange > 0) {
-                    actionType = "SOL RECEIVED";
-                    actionEmoji = "📥";
-                } else {
-                    actionType = "SOL SENT";
-                    actionEmoji = "📤";
-                }
-            } else {
-                console.log("ℹ️ Skipping minor network maintenance or non-asset movement log.");
+            // If there are no actual asset movements (just minor network logs), skip
+            if (movements.length === 0) {
+                console.log("No significant asset movements detected in this transaction.");
                 return;
             }
 
+            // 3. Build plain text alert message (No custom fonts so it is easy to read/copy)
             const solscanUrl = `https://solscan.io/tx/${signature}`;
-            const dexscreenerUrl = tokenMint !== "Unknown" ? `https://dexscreener.com/solana/${tokenMint}` : `https://dexscreener.com/solana/`;
+            const dexscreenerUrl = primaryTokenMint !== "Unknown" 
+                ? `https://dexscreener.com/solana/${primaryTokenMint}` 
+                : `https://dexscreener.com/solana/`;
 
             const alertMessage = `
-${actionEmoji} **${actionType}!** ${actionEmoji}
+ALERT: WALLET MOVEMENT DETECTED
 
-👤 **Wallet:** \`${targetWalletAddress.substring(0, 6)}...${targetWalletAddress.substring(targetWalletAddress.length - 4)}\`
-🪙 **Token:** **${tokenName}** ${tokenSymbol ? `(${tokenSymbol})` : ''}
-💰 **Amount:** \`${displayAmount}\`
-💊 **Token CA:** \`${targetMintOutput}\`
+Wallet: ${targetWalletAddress}
 
-🔗 **Solscan:** [View Transaction](${solscanUrl})
-📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
+Asset Changes:
+${movements.map(m => `* ${m}`).join('\n')}
+
+Solscan: ${solscanUrl}
+DexScreener: ${dexscreenerUrl}
             `;
 
             await bot.sendMessage(chatID, alertMessage, { 
-                parse_mode: 'Markdown', 
                 disable_web_page_preview: true 
             });
             
-            console.log(`✅ Sent alert for ${tokenName} (${displayAmount})`);
+            console.log(`Alert sent for transaction: ${signature}`);
         } catch (error) {
-            console.error('❌ Error executing transaction alert:', error);
+            console.error('Error executing transaction alert:', error);
         }
     },
     'confirmed'
