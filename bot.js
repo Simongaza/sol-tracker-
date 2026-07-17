@@ -20,10 +20,10 @@ const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
 const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
-// Array of wallets with unique display profiles
-const targetWallets = [
-    { name: 'Insider 1', address: '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd' },
-    { name: 'Insider 2', address: '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y' }
+// Add your wallets here (Separated by commas)
+const targetWalletAddresses = [
+    '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd', // Wallet 1
+    '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y'                // Wallet 2 (Replace or remove if not using yet)
 ];
 
 // ==========================================
@@ -32,10 +32,10 @@ const targetWallets = [
 const bot = new TelegramBot(botToken, { polling: false });
 const connection = new Connection(rpcUrl, 'confirmed');
 
-// Stores the known signatures for each wallet tracking context
+// Stores the known signatures for each wallet to detect brand-new ones
 const lastSeenSignatures = {};
 
-console.log(`🚀 Unbreakable HTTP Multi-Polling Engine active...`);
+console.log(`🚀 Unbreakable HTTP Polling Engine active...`);
 
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
@@ -76,10 +76,7 @@ async function getTokenMetadata(mintAddress) {
 // ==========================================
 // 4. TRANSACTION PARSER & ALERT SENDER
 // ==========================================
-async function parseAndSendAlert(tx, signature, wallet) {
-    const walletAddress = wallet.address;
-    const walletName = wallet.name;
-
+async function parseAndSendAlert(tx, signature, walletAddress) {
     const preTokenBalances = tx.meta.preTokenBalances || [];
     const postTokenBalances = tx.meta.postTokenBalances || [];
     
@@ -119,9 +116,9 @@ async function parseAndSendAlert(tx, signature, wallet) {
         solChange = (postSol - preSol) / 1e9;
     }
 
-    // Skip transaction if there is no major asset movement of any kind
+    // Skip transaction if there is no asset movement of any kind
     if (tokenChanges.length === 0 && Math.abs(solChange) <= 0.005) {
-        console.log(`ℹ️ Skipping minor network fee transaction for ${walletName}.`);
+        console.log("ℹ️ Skipping minor network fee transaction.");
         return;
     }
 
@@ -142,7 +139,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
         alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
-👤 **Wallet:** **${walletName}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
+👤 **Wallet:** \`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`
 🪙 **Token:** **${tokenName}** ${tokenSymbol ? `(${tokenSymbol})` : ''}
 💰 **Amount:** \`${formatAmount(primaryToken.change)} ${tokenSymbol}\`
 💊 **Token CA:** \`${primaryToken.mint}\`
@@ -160,7 +157,7 @@ ${actionEmoji} **${actionType}!** ${actionEmoji}
         alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
-👤 **Wallet:** **${walletName}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
+👤 **Wallet:** \`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`
 🪙 **Token:** **Solana (SOL)**
 💰 **Amount:** \`${formatAmount(solChange)} SOL\`
 💊 **Token CA:** \`Native SOL Asset\`
@@ -175,11 +172,11 @@ ${actionEmoji} **${actionType}!** ${actionEmoji}
         disable_web_page_preview: true 
     });
     
-    console.log(`✅ Alert pushed successfully for ${walletName}: ${signature}`);
+    console.log(`✅ Alert pushed successfully for transaction: ${signature}`);
 }
 
 // Fetch transaction data safely, retrying if the RPC node has an indexing lag
-async function fetchWithRetry(signature, wallet, retries = 5, delay = 2000) {
+async function fetchWithRetry(signature, walletAddress, retries = 5, delay = 2000) {
     for (let i = 0; i < retries; i++) {
         try {
             const tx = await connection.getParsedTransaction(signature, {
@@ -188,7 +185,7 @@ async function fetchWithRetry(signature, wallet, retries = 5, delay = 2000) {
             });
 
             if (tx && tx.meta) {
-                await parseAndSendAlert(tx, signature, wallet);
+                await parseAndSendAlert(tx, signature, walletAddress);
                 return;
             }
             console.log(`⚠️ Transaction ${signature.substring(0,6)}... not indexed yet. Retrying in ${delay/1000}s... (${i + 1}/${retries})`);
@@ -205,9 +202,9 @@ async function fetchWithRetry(signature, wallet, retries = 5, delay = 2000) {
 // 5. CORE STATEFUL POLLING ENGINE
 // ==========================================
 async function pollWallets() {
-    for (const wallet of targetWallets) {
-        const walletAddress = wallet.address;
-        const walletName = wallet.name;
+    for (const walletAddress of targetWalletAddresses) {
+        // Skip unconfigured slots safely
+        if (!walletAddress || walletAddress.startsWith('PASTE_YOUR_')) continue;
 
         try {
             const pubKey = new PublicKey(walletAddress);
@@ -220,7 +217,7 @@ async function pollWallets() {
             // Cold boot initialization: set up known history baseline so it doesn't spam old historical trades
             if (!lastSeenSignatures[walletAddress]) {
                 lastSeenSignatures[walletAddress] = new Set(signatures);
-                console.log(`📥 Tracking baseline locked for ${walletName} (${signatures.length} history items cached)`);
+                console.log(`📥 Tracking baseline locked for wallet ${walletAddress.substring(0, 6)}... (${signatures.length} history items cached)`);
                 continue;
             }
 
@@ -237,22 +234,22 @@ async function pollWallets() {
                 newSignatures.reverse(); 
 
                 for (const sig of newSignatures) {
-                    console.log(`🔔 New active transaction caught on ${walletName}: ${sig}`);
+                    console.log(`🔔 New active transaction caught on wallet ${walletAddress.substring(0, 6)}...: ${sig}`);
                     
                     lastSeenSignatures[walletAddress].add(sig);
                     
-                    // Keep cache bounded per wallet context to prevent memory leaks
+                    // Keep cache bounded to prevent memory leaks
                     if (lastSeenSignatures[walletAddress].size > 50) {
                         const oldestCachedItem = lastSeenSignatures[walletAddress].values().next().value;
                         lastSeenSignatures[walletAddress].delete(oldestCachedItem);
                     }
 
                     // Process and alert
-                    await fetchWithRetry(sig, wallet);
+                    await fetchWithRetry(sig, walletAddress);
                 }
             }
         } catch (err) {
-            console.error(`❌ Network error while polling ${walletName}:`, err.message);
+            console.error(`❌ Network error while polling wallet ${walletAddress.substring(0, 6)}:`, err.message);
         }
     }
 }
