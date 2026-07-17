@@ -2,15 +2,18 @@ const TelegramBot = require('node-telegram-bot-api');
 const { Connection, PublicKey } = require('@solana/web3.js');
 const http = require('http');
 
+// Generate a unique ID for this specific running process
+const instanceId = Math.random().toString(36).substring(2, 6).toUpperCase();
+
 // ==========================================
 // 1. DUMMY SERVER FOR RENDER (Keeps Free Tier Alive)
 // ==========================================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Solana Multi-Tracker Bot is running!\n');
+    res.end(`Solana Multi-Tracker Bot is running! [Engine: ${instanceId}]\n`);
 }).listen(PORT, '0.0.0.0', () => {
-    console.log(`📡 Port bound successfully on port ${PORT}`);
+    console.log(`📡 Port bound successfully on port ${PORT} | Engine ID: ${instanceId}`);
 });
 
 // ==========================================
@@ -20,10 +23,10 @@ const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
 const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
-// Add your wallets here (Separated by commas)
-const targetWalletAddresses = [
-    '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd', // Wallet 1
-    '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y'                // Wallet 2 (Replace or remove if not using yet)
+// Array of wallets with unique display profiles
+const targetWallets = [
+    { name: 'Insider 1', address: '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd' },
+    { name: 'Insider 2', address: '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y' }
 ];
 
 // ==========================================
@@ -32,10 +35,10 @@ const targetWalletAddresses = [
 const bot = new TelegramBot(botToken, { polling: false });
 const connection = new Connection(rpcUrl, 'confirmed');
 
-// Stores the known signatures for each wallet to detect brand-new ones
+// Stores the known signatures for each wallet tracking context
 const lastSeenSignatures = {};
 
-console.log(`🚀 Unbreakable HTTP Polling Engine active...`);
+console.log(`🚀 Engine Instance [${instanceId}] active and polling...`);
 
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
@@ -76,19 +79,19 @@ async function getTokenMetadata(mintAddress) {
 // ==========================================
 // 4. TRANSACTION PARSER & ALERT SENDER
 // ==========================================
-async function parseAndSendAlert(tx, signature, walletAddress) {
+async function parseAndSendAlert(tx, signature, wallet) {
+    const walletAddress = wallet.address;
+    const walletName = wallet.name;
+
     const preTokenBalances = tx.meta.preTokenBalances || [];
     const postTokenBalances = tx.meta.postTokenBalances || [];
     
-    // Collect all unique token mints where our tracked wallet is the owner
     const involvedMints = new Set();
     preTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
     postTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
     
-    // Ignore wrapped SOL in the token array to track it cleanly via native balances
     involvedMints.delete('So11111111111111111111111111111111111111112');
 
-    // Calculate absolute balance changes for every meme coin involved
     const tokenChanges = [];
     for (const mint of involvedMints) {
         const pre = preTokenBalances.find(p => p.mint === mint && p.owner === walletAddress);
@@ -103,7 +106,6 @@ async function parseAndSendAlert(tx, signature, walletAddress) {
         }
     }
 
-    // Calculate Net Native SOL Change
     let solChange = 0;
     const postBalancesSol = tx.meta.postBalances || [];
     const preBalancesSol = tx.meta.preBalances || [];
@@ -116,16 +118,13 @@ async function parseAndSendAlert(tx, signature, walletAddress) {
         solChange = (postSol - preSol) / 1e9;
     }
 
-    // Skip transaction if there is no asset movement of any kind
     if (tokenChanges.length === 0 && Math.abs(solChange) <= 0.005) {
-        console.log("ℹ️ Skipping minor network fee transaction.");
         return;
     }
 
     let alertMessage = "";
     const solscanUrl = `https://solscan.io/tx/${signature}`;
 
-    // Case A: Token Trade/Swap Detected (e.g. HOUSEM, PTBL, ANCAT)
     if (tokenChanges.length > 0) {
         const primaryToken = tokenChanges[0];
         const meta = await getTokenMetadata(primaryToken.mint);
@@ -139,7 +138,7 @@ async function parseAndSendAlert(tx, signature, walletAddress) {
         alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
-👤 **Wallet:** \`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`
+👤 **Wallet:** **${walletName}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
 🪙 **Token:** **${tokenName}** ${tokenSymbol ? `(${tokenSymbol})` : ''}
 💰 **Amount:** \`${formatAmount(primaryToken.change)} ${tokenSymbol}\`
 💊 **Token CA:** \`${primaryToken.mint}\`
@@ -147,23 +146,25 @@ ${actionEmoji} **${actionType}!** ${actionEmoji}
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
+
+⚙️ \`Engine ID: ${instanceId}\`
         `;
-    } 
-    // Case B: Pure SOL Transaction (No SPL tokens involved)
-    else {
+    } else {
         const actionType = solChange > 0 ? "SOL RECEIVED" : "SOL SENT";
         const actionEmoji = solChange > 0 ? "📥" : "📤";
 
         alertMessage = `
 ${actionEmoji} **${actionType}!** ${actionEmoji}
 
-👤 **Wallet:** \`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`
+👤 **Wallet:** **${walletName}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
 🪙 **Token:** **Solana (SOL)**
 💰 **Amount:** \`${formatAmount(solChange)} SOL\`
 💊 **Token CA:** \`Native SOL Asset\`
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](https://dexscreener.com/solana/)
+
+⚙️ \`Engine ID: ${instanceId}\`
         `;
     }
 
@@ -171,12 +172,9 @@ ${actionEmoji} **${actionType}!** ${actionEmoji}
         parse_mode: 'Markdown', 
         disable_web_page_preview: true 
     });
-    
-    console.log(`✅ Alert pushed successfully for transaction: ${signature}`);
 }
 
-// Fetch transaction data safely, retrying if the RPC node has an indexing lag
-async function fetchWithRetry(signature, walletAddress, retries = 5, delay = 2000) {
+async function fetchWithRetry(signature, wallet, retries = 5, delay = 2000) {
     for (let i = 0; i < retries; i++) {
         try {
             const tx = await connection.getParsedTransaction(signature, {
@@ -185,74 +183,65 @@ async function fetchWithRetry(signature, walletAddress, retries = 5, delay = 200
             });
 
             if (tx && tx.meta) {
-                await parseAndSendAlert(tx, signature, walletAddress);
+                await parseAndSendAlert(tx, signature, wallet);
                 return;
             }
-            console.log(`⚠️ Transaction ${signature.substring(0,6)}... not indexed yet. Retrying in ${delay/1000}s... (${i + 1}/${retries})`);
             await new Promise(resolve => setTimeout(resolve, delay));
         } catch (e) {
-            console.error(`❌ Fetch error on try ${i + 1}:`, e.message);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    console.error(`❌ Failed to retrieve indexed data for signature: ${signature}`);
 }
 
 // ==========================================
 // 5. CORE STATEFUL POLLING ENGINE
 // ==========================================
 async function pollWallets() {
-    for (const walletAddress of targetWalletAddresses) {
-        // Skip unconfigured slots safely
-        if (!walletAddress || walletAddress.startsWith('PASTE_YOUR_')) continue;
+    for (const wallet of targetWallets) {
+        const walletAddress = wallet.address;
+        const walletName = wallet.name;
 
         try {
             const pubKey = new PublicKey(walletAddress);
-            // Fetch the last 5 signatures to prevent missing rapid bursts of trades
             const signaturesInfo = await connection.getSignaturesForAddress(pubKey, { limit: 5 });
             
             if (!signaturesInfo || signaturesInfo.length === 0) continue;
             const signatures = signaturesInfo.map(s => s.signature);
 
-            // Cold boot initialization: set up known history baseline so it doesn't spam old historical trades
             if (!lastSeenSignatures[walletAddress]) {
                 lastSeenSignatures[walletAddress] = new Set(signatures);
-                console.log(`📥 Tracking baseline locked for wallet ${walletAddress.substring(0, 6)}... (${signatures.length} history items cached)`);
+                console.log(`📥 Baseline locked for ${walletName} | Engine ID: ${instanceId}`);
                 continue;
             }
 
-            // Identify brand new signatures
             const newSignatures = [];
             for (const sig of signatures) {
                 if (!lastSeenSignatures[walletAddress].has(sig)) {
                     newSignatures.push(sig);
+                    // LOCK IMMEDIATELY to prevent intra-loop execution duplicates
+                    lastSeenSignatures[walletAddress].add(sig);
                 }
             }
 
-            // If new transactions are detected, process them chronologically (oldest to newest)
             if (newSignatures.length > 0) {
                 newSignatures.reverse(); 
 
                 for (const sig of newSignatures) {
-                    console.log(`🔔 New active transaction caught on wallet ${walletAddress.substring(0, 6)}...: ${sig}`);
+                    console.log(`🔔 New transaction caught on ${walletName}: ${sig}`);
                     
-                    lastSeenSignatures[walletAddress].add(sig);
-                    
-                    // Keep cache bounded to prevent memory leaks
                     if (lastSeenSignatures[walletAddress].size > 50) {
                         const oldestCachedItem = lastSeenSignatures[walletAddress].values().next().value;
                         lastSeenSignatures[walletAddress].delete(oldestCachedItem);
                     }
 
-                    // Process and alert
-                    await fetchWithRetry(sig, walletAddress);
+                    await fetchWithRetry(sig, wallet);
                 }
             }
         } catch (err) {
-            console.error(`❌ Network error while polling wallet ${walletAddress.substring(0, 6)}:`, err.message);
+            console.error(`❌ Polling error on ${walletName}:`, err.message);
         }
     }
 }
 
-// Execute polling check perfectly every 4 seconds
+// Check every 4 seconds
 setInterval(pollWallets, 4000);
