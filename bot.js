@@ -10,19 +10,18 @@ const instanceId = Math.random().toString(36).substring(2, 6).toUpperCase();
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`Solana Tracker (Hold + Sell Alert Mode) is active! [Engine: ${instanceId}]\n`);
+    res.end(`Solana Tracker (Memory Mode) is active! [Engine: ${instanceId}]\n`);
 }).listen(PORT, '0.0.0.0', () => {
     console.log(`📡 Server bound on port ${PORT}`);
 });
 
 // ==========================================
-// 2. CONFIGURATION
+// 2. CONFIGURATION & STATE MEMORY
 // ==========================================
 const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
 const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
-// 2 minutes delay (120,000 ms) before checking if a buy is still held
 const HOLD_CHECK_DELAY_MS = 2 * 60 * 1000; 
 
 const targetWallets = [
@@ -30,6 +29,10 @@ const targetWallets = [
     { name: 'Insider 2', address: '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y' },
     { name: '200x insider', address: 'A4KxLRntS2V6giboMyfDtwoysmsKPaz8Juw6CwHYxVXn' }
 ];
+
+// STATE MEMORY: This remembers which tokens the bot told you about.
+const trackedPositions = {};
+targetWallets.forEach(w => trackedPositions[w.address] = new Set());
 
 // ==========================================
 // 3. INITIALIZATION
@@ -39,14 +42,14 @@ const connection = new Connection(rpcUrl, 'confirmed');
 const lastSeenSignatures = {};
 
 bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, `✅ **Hold + Sell Alert Tracker Bot is LIVE!**\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id, `✅ **Memory Tracker Bot is LIVE!**\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/ping/, (msg) => {
-    bot.sendMessage(msg.chat.id, `🏓 **Pong!** Engine online scanning buys & dumps.\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id, `🏓 **Pong!** Engine online. Tracking verified holds only.\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
 });
 
-console.log(`🚀 Engine Instance [${instanceId}] active (Tracking Holds + Sell Signals)...`);
+console.log(`🚀 Engine Instance [${instanceId}] active (State Memory Enabled)...`);
 
 // ==========================================
 // 4. HELPER FUNCTIONS
@@ -59,7 +62,6 @@ function formatAmount(amount) {
     return amount.toFixed(2);
 }
 
-// Fetch token metadata from Solana RPC
 async function getTokenMetadata(mintAddress) {
     if (!mintAddress || mintAddress === "Unknown" || mintAddress === "SOL") return { name: "Solana", symbol: "SOL" };
     try {
@@ -72,50 +74,42 @@ async function getTokenMetadata(mintAddress) {
         if (result?.content?.metadata) {
             return { name: result.content.metadata.name || "Unknown Token", symbol: result.content.metadata.symbol || "UNKNOWN" };
         }
-    } catch (e) { /* Silent fallback */ }
+    } catch (e) {}
     return { name: "Unknown Token", symbol: "UNKNOWN" };
 }
 
-// Fetch real-time token price from DexScreener API
 async function getTokenPrice(mintAddress) {
     try {
         const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`);
         const data = await response.json();
-        
         if (data && data.pairs && data.pairs.length > 0) {
             const bestPair = data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
             return parseFloat(bestPair.priceUsd || 0);
         }
-    } catch (err) {
-        console.error(`❌ DexScreener price error for ${mintAddress}:`, err.message);
-    }
+    } catch (err) {}
     return 0;
 }
 
-// Query on-chain token balance to check if still held
 async function verifyWalletHoldsToken(walletAddress, mintAddress) {
     try {
         const parsedAccounts = await connection.getParsedTokenAccountsByOwner(
             new PublicKey(walletAddress),
             { mint: new PublicKey(mintAddress) }
         );
-
         if (!parsedAccounts || parsedAccounts.value.length === 0) return 0;
 
         let totalBalance = 0;
         for (const acc of parsedAccounts.value) {
-            const amount = acc.account.data.parsed.info.tokenAmount.uiAmount || 0;
-            totalBalance += amount;
+            totalBalance += acc.account.data.parsed.info.tokenAmount.uiAmount || 0;
         }
         return totalBalance;
     } catch (err) {
-        console.error(`❌ Hold check error for ${mintAddress}:`, err.message);
         return 0;
     }
 }
 
 // ==========================================
-// 5. PARSER (HANDLES BOTH BUYS & SELLS)
+// 5. PARSER (MEMORY LOGIC APPLIED)
 // ==========================================
 async function parseAndSendAlert(tx, signature, wallet) {
     if (!tx || !tx.meta || tx.meta.err) return; 
@@ -127,7 +121,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
     const involvedMints = new Set();
     preTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
     postTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
-    involvedMints.delete('So11111111111111111111111111111111111111112'); // Exclude Wrapped SOL
+    involvedMints.delete('So11111111111111111111111111111111111111112'); 
 
     const buys = [];
     const sells = [];
@@ -145,41 +139,57 @@ async function parseAndSendAlert(tx, signature, wallet) {
     }
 
     // ------------------------------------------
-    // A. IMMEDIATE SELL ALERTS (EXIT SIGNAL)
+    // A. IMMEDIATE SELL ALERTS (FILTERED BY MEMORY)
     // ------------------------------------------
     if (sells.length > 0) {
         const sellToken = sells[0];
         const mintAddress = sellToken.mint;
         const soldAmount = sellToken.change;
 
-        const meta = await getTokenMetadata(mintAddress);
-        const dexscreenerUrl = `https://dexscreener.com/solana/${mintAddress}`;
-        const solscanUrl = `https://solscan.io/tx/${signature}`;
+        // MEMORY CHECK: Only alert if we told you they were holding this token
+        if (trackedPositions[walletAddress] && trackedPositions[walletAddress].has(mintAddress)) {
+            const meta = await getTokenMetadata(mintAddress);
+            const dexscreenerUrl = `https://dexscreener.com/solana/${mintAddress}`;
+            const solscanUrl = `https://solscan.io/tx/${signature}`;
 
-        const sellAlert = `
-🔴 **SELL DETECTED!** 🔴
+            // Check if they dumped the entire bag
+            const remainingBalance = await verifyWalletHoldsToken(walletAddress, mintAddress);
+            let bagStatus = remainingBalance === 0 ? "⚠️ **POSITION FULLY CLOSED** ⚠️" : `💼 **Remaining Bag:** \`${formatAmount(remainingBalance)} ${meta.symbol}\``;
+
+            const sellAlert = `
+🔴 **TRACKED SELL DETECTED!** 🔴
 
 👤 **Wallet:** **${wallet.name}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
 🪙 **Token:** **${meta.name}** ${meta.symbol ? `(${meta.symbol})` : ''}
 💊 **Token CA:** \`${mintAddress}\`
 
 📤 **Sold Amount:** \`${formatAmount(soldAmount)} ${meta.symbol}\`
+${bagStatus}
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
-        `;
+            `;
 
-        try {
-            await bot.sendMessage(chatID, sellAlert.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
-            console.log(`🔴 Immediate sell alert sent for ${meta.symbol} (${mintAddress})`);
-        } catch (err) {
-            console.error("❌ Telegram Send Error:", err.message);
+            try {
+                await bot.sendMessage(chatID, sellAlert.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
+                console.log(`🔴 Tracked sell alert sent for ${meta.symbol} (${mintAddress})`);
+                
+                // If they have no tokens left, remove it from the bot's memory
+                if (remainingBalance === 0) {
+                    trackedPositions[walletAddress].delete(mintAddress);
+                    console.log(`🗑️ Position fully closed. Removed ${mintAddress} from memory.`);
+                }
+            } catch (err) {
+                console.error("❌ Telegram Send Error:", err.message);
+            }
+        } else {
+            // Fails the memory check. The bot stays completely silent.
+            console.log(`🗑️ Ignored untracked sell for ${mintAddress} (Not in active holds).`);
         }
-        return;
     }
 
     // ------------------------------------------
-    // B. DELAYED BUY ALERTS (HOLD FILTER)
+    // B. DELAYED BUY ALERTS (ADD TO MEMORY)
     // ------------------------------------------
     if (buys.length > 0) {
         const primaryToken = buys[0];
@@ -187,19 +197,20 @@ async function parseAndSendAlert(tx, signature, wallet) {
         const boughtAmount = primaryToken.change;
 
         console.log(`⏳ Buy detected for ${wallet.name} on ${mintAddress}. Capturing entry price...`);
-        
-        // Snapshot 1: Entry price
         const entryPriceUsd = await getTokenPrice(mintAddress);
 
-        // Wait 2 minutes before confirming hold
         setTimeout(async () => {
             const currentHeldBalance = await verifyWalletHoldsToken(walletAddress, mintAddress);
 
             if (currentHeldBalance > 0) {
-                // Snapshot 2: Current price after 2 minutes
+                
+                // NEW STEP: Add this token to the bot's memory so it watches for the sell
+                if (trackedPositions[walletAddress]) {
+                    trackedPositions[walletAddress].add(mintAddress);
+                }
+
                 const currentPriceUsd = await getTokenPrice(mintAddress);
                 const currentValueUsd = currentPriceUsd * currentHeldBalance;
-                
                 const costBasisForHeld = entryPriceUsd * currentHeldBalance;
                 const unrealizedProfit = currentValueUsd - costBasisForHeld;
                 
@@ -231,7 +242,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
 📥 **Bought Amount:** \`${formatAmount(boughtAmount)} ${meta.symbol}\`
 💼 **Currently Holding:** \`${formatAmount(currentHeldBalance)} ${meta.symbol}\`${profitString}
 
-⏱️ *Verified: Token still held 2+ mins after buy.*
+⏱️ *Verified: Token still held 2+ mins after buy. Added to Watchlist.*
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
@@ -239,7 +250,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
 
                 try {
                     await bot.sendMessage(chatID, holdAlert.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
-                    console.log(`✅ Alert sent for held token ${mintAddress}`);
+                    console.log(`✅ Alert sent & memory updated for ${mintAddress}`);
                 } catch (err) {
                     console.error("❌ Telegram Send Error:", err.message);
                 }
