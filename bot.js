@@ -5,12 +5,12 @@ const http = require('http');
 const instanceId = Math.random().toString(36).substring(2, 6).toUpperCase();
 
 // ==========================================
-// 1. DUMMY SERVER FOR RENDER/RAILWAY
+// 1. DUMMY SERVER FOR CLOUD HOSTING (Railway/Render)
 // ==========================================
 const PORT = process.env.PORT || 10000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`Solana Multi-Tracker Bot is running! [Engine: ${instanceId}]\n`);
+    res.end(`Solana Multi-Tracker (Hold + PnL Mode) is active! [Engine: ${instanceId}]\n`);
 }).listen(PORT, '0.0.0.0', () => {
     console.log(`📡 Server bound on port ${PORT}`);
 });
@@ -22,6 +22,9 @@ const botToken = '8824963965:AAFtESw6niqh7FsgGrKyUotv-5x8o0lqFLw';
 const chatID = '7113872351';
 const rpcUrl = 'https://mainnet.helius-rpc.com/?api-key=f9853790-c087-4200-b5de-41d5c4789573';
 
+// 2 minutes delay (120,000 ms) before checking if the token is still held
+const HOLD_CHECK_DELAY_MS = 2 * 60 * 1000; 
+
 const targetWallets = [
     { name: 'Insider 1', address: '2AqFJzcgSMQ9v7Vwh4yE7Vux8brcrjus1eg4K1zM2zUd' },
     { name: 'Insider 2', address: '5URyNUmhcuWdZiiQrtNdFrSbQPfq72UV2gqQasr9c19Y' },
@@ -29,26 +32,24 @@ const targetWallets = [
 ];
 
 // ==========================================
-// 3. INITIALIZATION & TELEGRAM COMMANDS
+// 3. INITIALIZATION
 // ==========================================
-// Polling is now TRUE so the bot can receive your direct messages
 const bot = new TelegramBot(botToken, { polling: true });
 const connection = new Connection(rpcUrl, 'confirmed');
 const lastSeenSignatures = {};
 
-// Type /start or /ping in Telegram to verify the bot is alive!
 bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, `✅ **Veyron Tracker Bot is LIVE!**\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id, `✅ **Hold + PnL Tracker Bot is LIVE!**\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
 });
 
 bot.onText(/\/ping/, (msg) => {
-    bot.sendMessage(msg.chat.id, `🏓 **Pong!** Bot is online and actively scanning.\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id, `🏓 **Pong!** Engine online. Fast flips filtered out.\n⚙️ Engine ID: \`${instanceId}\``, { parse_mode: 'Markdown' });
 });
 
-console.log(`🚀 Engine Instance [${instanceId}] active...`);
+console.log(`🚀 Engine Instance [${instanceId}] active (Filtering fast-flips + Tracking PnL)...`);
 
 // ==========================================
-// 4. PARSERS & HELPERS
+// 4. HELPER FUNCTIONS
 // ==========================================
 function formatAmount(amount) {
     const absAmount = Math.abs(amount);
@@ -58,6 +59,7 @@ function formatAmount(amount) {
     return amount.toFixed(2);
 }
 
+// Fetch token metadata from Solana RPC
 async function getTokenMetadata(mintAddress) {
     if (!mintAddress || mintAddress === "Unknown" || mintAddress === "SOL") return { name: "Solana", symbol: "SOL" };
     try {
@@ -70,12 +72,52 @@ async function getTokenMetadata(mintAddress) {
         if (result?.content?.metadata) {
             return { name: result.content.metadata.name || "Unknown Token", symbol: result.content.metadata.symbol || "UNKNOWN" };
         }
-    } catch (e) { /* Silent fallback if lookup fails */ }
+    } catch (e) { /* Silent fallback */ }
     return { name: "Unknown Token", symbol: "UNKNOWN" };
 }
 
+// Fetch real-time token price from DexScreener API
+async function getTokenPrice(mintAddress) {
+    try {
+        const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`);
+        const data = await response.json();
+        
+        if (data && data.pairs && data.pairs.length > 0) {
+            const bestPair = data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+            return parseFloat(bestPair.priceUsd || 0);
+        }
+    } catch (err) {
+        console.error(`❌ DexScreener price error for ${mintAddress}:`, err.message);
+    }
+    return 0;
+}
+
+// Query on-chain token balance to check if still held
+async function verifyWalletHoldsToken(walletAddress, mintAddress) {
+    try {
+        const parsedAccounts = await connection.getParsedTokenAccountsByOwner(
+            new PublicKey(walletAddress),
+            { mint: new PublicKey(mintAddress) }
+        );
+
+        if (!parsedAccounts || parsedAccounts.value.length === 0) return 0;
+
+        let totalBalance = 0;
+        for (const acc of parsedAccounts.value) {
+            const amount = acc.account.data.parsed.info.tokenAmount.uiAmount || 0;
+            totalBalance += amount;
+        }
+        return totalBalance;
+    } catch (err) {
+        console.error(`❌ Hold check error for ${mintAddress}:`, err.message);
+        return 0;
+    }
+}
+
+// ==========================================
+// 5. ALERT PARSER WITH DELAYED PnL CHECK
+// ==========================================
 async function parseAndSendAlert(tx, signature, wallet) {
-    // Drop completely failed transactions so you don't get false alarms
     if (!tx || !tx.meta || tx.meta.err) return; 
     
     const walletAddress = wallet.address;
@@ -85,7 +127,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
     const involvedMints = new Set();
     preTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
     postTokenBalances.forEach(p => { if (p.owner === walletAddress) involvedMints.add(p.mint); });
-    involvedMints.delete('So11111111111111111111111111111111111111112'); // Ignore wrapped SOL
+    involvedMints.delete('So11111111111111111111111111111111111111112'); // Exclude Wrapped SOL
 
     const tokenChanges = [];
     for (const mint of involvedMints) {
@@ -96,66 +138,79 @@ async function parseAndSendAlert(tx, signature, wallet) {
         const postAmount = post?.uiTokenAmount?.uiAmount || 0;
         const change = postAmount - preAmount;
 
-        if (Math.abs(change) > 0) tokenChanges.push({ mint, change });
+        if (change > 0) tokenChanges.push({ mint, change });
     }
 
-    let solChange = 0;
-    const postBalancesSol = tx.meta.postBalances || [];
-    const preBalancesSol = tx.meta.preBalances || [];
+    // Ignore sells and zero-change transactions completely
+    if (tokenChanges.length === 0) return;
+
+    const primaryToken = tokenChanges[0];
+    const mintAddress = primaryToken.mint;
+    const boughtAmount = primaryToken.change;
+
+    console.log(`⏳ Buy detected for ${wallet.name} on ${mintAddress}. Capturing entry price...`);
     
-    // Safely parse account keys whether they are objects or raw strings
-    const accountKeys = tx.transaction.message.accountKeys.map(k => typeof k === 'string' ? k : (k.pubkey ? k.pubkey.toString() : k.toString()));
-    const targetIndex = accountKeys.indexOf(walletAddress);
+    // Snapshot 1: Entry price right when the buy happens
+    const entryPriceUsd = await getTokenPrice(mintAddress);
 
-    if (targetIndex !== -1) {
-        solChange = ((postBalancesSol[targetIndex] || 0) - (preBalancesSol[targetIndex] || 0)) / 1e9;
-    }
+    // Buffer: Wait 2 minutes before checking if still held and calculating PnL
+    setTimeout(async () => {
+        const currentHeldBalance = await verifyWalletHoldsToken(walletAddress, mintAddress);
 
-    // Ignore tiny dust fees if no tokens moved
-    if (tokenChanges.length === 0 && Math.abs(solChange) <= 0.005) return;
+        // SPAM FILTER: Only proceed if they are STILL holding tokens after 2 minutes
+        if (currentHeldBalance > 0) {
+            // Snapshot 2: Current price after 2 minutes
+            const currentPriceUsd = await getTokenPrice(mintAddress);
+            const currentValueUsd = currentPriceUsd * currentHeldBalance;
+            
+            // PnL Calculation
+            const costBasisForHeld = entryPriceUsd * currentHeldBalance;
+            const unrealizedProfit = currentValueUsd - costBasisForHeld;
+            
+            let profitString = '';
+            if (entryPriceUsd > 0 && currentPriceUsd > 0) {
+                const profitPercent = ((currentPriceUsd - entryPriceUsd) / entryPriceUsd) * 100;
+                const sign = unrealizedProfit >= 0 ? '+' : '';
+                const emoji = unrealizedProfit >= 0 ? '🚀' : '🩸';
+                
+                const formattedProfit = unrealizedProfit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const formattedValue = currentValueUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                
+                profitString = `\n${emoji} **Unrealized PnL:** \`${sign}$${formattedProfit}\` (${sign}${profitPercent.toFixed(2)}%)\n💰 **Current Bag Value:** \`$${formattedValue}\``;
+            } else if (currentValueUsd > 0) {
+                profitString = `\n💰 **Current Bag Value:** \`$${currentValueUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\``;
+            }
 
-    let alertMessage = "";
-    const solscanUrl = `https://solscan.io/tx/${signature}`;
+            const meta = await getTokenMetadata(mintAddress);
+            const dexscreenerUrl = `https://dexscreener.com/solana/${mintAddress}`;
+            const solscanUrl = `https://solscan.io/tx/${signature}`;
 
-    if (tokenChanges.length > 0) {
-        const primaryToken = tokenChanges[0];
-        const meta = await getTokenMetadata(primaryToken.mint);
-        const actionType = primaryToken.change > 0 ? "BUY DETECTED" : "SELL DETECTED";
-        const actionEmoji = primaryToken.change > 0 ? "🟢" : "🔴";
-        const dexscreenerUrl = `https://dexscreener.com/solana/${primaryToken.mint}`;
-
-        alertMessage = `
-${actionEmoji} **${actionType}!** ${actionEmoji}
+            const alertMessage = `
+💎 **INSIDER IS HOLDING!** 💎
 
 👤 **Wallet:** **${wallet.name}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
 🪙 **Token:** **${meta.name}** ${meta.symbol ? `(${meta.symbol})` : ''}
-💰 **Amount:** \`${formatAmount(primaryToken.change)} ${meta.symbol}\`
-💊 **Token CA:** \`${primaryToken.mint}\`
-⛽ **SOL Value:** \`${solChange > 0 ? '+' : ''}${solChange.toFixed(4)} SOL\`
+💊 **Token CA:** \`${mintAddress}\`
+
+📥 **Bought Amount:** \`${formatAmount(boughtAmount)} ${meta.symbol}\`
+💼 **Currently Holding:** \`${formatAmount(currentHeldBalance)} ${meta.symbol}\`${profitString}
+
+⏱️ *Verified: Token still held 2+ mins after buy.*
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
 📈 **DexScreener:** [Check Charts](${dexscreenerUrl})
-        `;
-    } else {
-        const actionType = solChange > 0 ? "SOL RECEIVED" : "SOL SENT";
-        const actionEmoji = solChange > 0 ? "📥" : "📤";
+            `;
 
-        alertMessage = `
-${actionEmoji} **${actionType}!** ${actionEmoji}
-
-👤 **Wallet:** **${wallet.name}** (\`${walletAddress.substring(0, 6)}...${walletAddress.substring(walletAddress.length - 4)}\`)
-🪙 **Token:** **Solana (SOL)**
-💰 **Amount:** \`${formatAmount(solChange)} SOL\`
-
-🔗 **Solscan:** [View Transaction](${solscanUrl})
-        `;
-    }
-
-    try {
-        await bot.sendMessage(chatID, alertMessage.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
-    } catch (err) {
-        console.error("❌ Telegram Send Error:", err.message);
-    }
+            try {
+                await bot.sendMessage(chatID, alertMessage.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
+                console.log(`✅ Alert sent for held token ${mintAddress} (PnL calculated).`);
+            } catch (err) {
+                console.error("❌ Telegram Send Error:", err.message);
+            }
+        } else {
+            console.log(`🗑️ Fast-flip ignored for ${mintAddress} (Insider sold within 2 mins).`);
+        }
+    }, HOLD_CHECK_DELAY_MS);
 }
 
 async function fetchWithRetry(signature, wallet, retries = 5, delay = 3000) {
@@ -174,7 +229,7 @@ async function fetchWithRetry(signature, wallet, retries = 5, delay = 3000) {
 }
 
 // ==========================================
-// 5. CORE ENGINE (CRASH-PROOF LOOP)
+// 6. MAIN ENGINE LOOP
 // ==========================================
 async function pollWallets() {
     for (const wallet of targetWallets) {
@@ -184,18 +239,10 @@ async function pollWallets() {
             
             if (!signaturesInfo || signaturesInfo.length === 0) continue;
 
-            // Cold Boot Catch-Up Logic
             if (!lastSeenSignatures[wallet.address]) {
                 lastSeenSignatures[wallet.address] = new Set();
-                const fiveMinsAgo = Math.floor(Date.now() / 1000) - (5 * 60);
-
                 for (const sigInfo of signaturesInfo) {
                     lastSeenSignatures[wallet.address].add(sigInfo.signature);
-                    
-                    // If a trade happened in the last 5 mins while bot was offline/sleeping, alert it!
-                    if (sigInfo.blockTime && sigInfo.blockTime > fiveMinsAgo) {
-                        await fetchWithRetry(sigInfo.signature, wallet);
-                    }
                 }
                 continue;
             }
@@ -211,7 +258,6 @@ async function pollWallets() {
             if (newSignatures.length > 0) {
                 newSignatures.reverse(); 
                 for (const sig of newSignatures) {
-                    // Prevent memory leaks
                     if (lastSeenSignatures[wallet.address].size > 50) {
                         lastSeenSignatures[wallet.address].delete(lastSeenSignatures[wallet.address].values().next().value);
                     }
@@ -223,9 +269,7 @@ async function pollWallets() {
         }
     }
     
-    // RECURSIVE TIMEOUT: Prevents avalanche crashing and RPC bans
     setTimeout(pollWallets, 5000);
 }
 
-// Start the engine
 pollWallets();
