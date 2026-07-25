@@ -30,7 +30,7 @@ const targetWallets = [
     { name: '200x insider', address: 'A4KxLRntS2V6giboMyfDtwoysmsKPaz8Juw6CwHYxVXn' }
 ];
 
-// STATE MEMORY: This remembers which tokens the bot told you about.
+// STATE MEMORY: Remembers which tokens the bot told you about.
 const trackedPositions = {};
 targetWallets.forEach(w => trackedPositions[w.address] = new Set());
 
@@ -109,7 +109,7 @@ async function verifyWalletHoldsToken(walletAddress, mintAddress) {
 }
 
 // ==========================================
-// 5. PARSER (MEMORY LOGIC APPLIED)
+// 5. PARSER (MEMORY & VALUE LOGIC APPLIED)
 // ==========================================
 async function parseAndSendAlert(tx, signature, wallet) {
     if (!tx || !tx.meta || tx.meta.err) return; 
@@ -139,7 +139,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
     }
 
     // ------------------------------------------
-    // A. IMMEDIATE SELL ALERTS (FILTERED BY MEMORY)
+    // A. IMMEDIATE SELL ALERTS
     // ------------------------------------------
     if (sells.length > 0) {
         const sellToken = sells[0];
@@ -149,6 +149,18 @@ async function parseAndSendAlert(tx, signature, wallet) {
         // MEMORY CHECK: Only alert if we told you they were holding this token
         if (trackedPositions[walletAddress] && trackedPositions[walletAddress].has(mintAddress)) {
             const meta = await getTokenMetadata(mintAddress);
+            
+            // --- NEW CALCULATIONS: Fetch USD & SOL Value ---
+            const tokenPriceUsd = await getTokenPrice(mintAddress);
+            const solPriceUsd = await getTokenPrice('So11111111111111111111111111111111111111112'); // Fetch live SOL price
+            
+            const soldValueUsd = soldAmount * tokenPriceUsd;
+            const soldValueSol = solPriceUsd > 0 ? (soldValueUsd / solPriceUsd) : 0;
+            
+            const formattedUsd = soldValueUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const formattedSol = soldValueSol.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            // ----------------------------------------------
+
             const dexscreenerUrl = `https://dexscreener.com/solana/${mintAddress}`;
             const solscanUrl = `https://solscan.io/tx/${signature}`;
 
@@ -156,6 +168,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
             const remainingBalance = await verifyWalletHoldsToken(walletAddress, mintAddress);
             let bagStatus = remainingBalance === 0 ? "⚠️ **POSITION FULLY CLOSED** ⚠️" : `💼 **Remaining Bag:** \`${formatAmount(remainingBalance)} ${meta.symbol}\``;
 
+            // Notice the new 💵 Value Sold line below:
             const sellAlert = `
 🔴 **TRACKED SELL DETECTED!** 🔴
 
@@ -164,6 +177,7 @@ async function parseAndSendAlert(tx, signature, wallet) {
 💊 **Token CA:** \`${mintAddress}\`
 
 📤 **Sold Amount:** \`${formatAmount(soldAmount)} ${meta.symbol}\`
+💵 **Value Sold:** \`$${formattedUsd}\` / \`${formattedSol} SOL\`
 ${bagStatus}
 
 🔗 **Solscan:** [View Transaction](${solscanUrl})
@@ -172,7 +186,7 @@ ${bagStatus}
 
             try {
                 await bot.sendMessage(chatID, sellAlert.trim(), { parse_mode: 'Markdown', disable_web_page_preview: true });
-                console.log(`🔴 Tracked sell alert sent for ${meta.symbol} (${mintAddress})`);
+                console.log(`🔴 Tracked sell alert sent for ${meta.symbol} - $${formattedUsd} / ${formattedSol} SOL`);
                 
                 // If they have no tokens left, remove it from the bot's memory
                 if (remainingBalance === 0) {
@@ -183,7 +197,6 @@ ${bagStatus}
                 console.error("❌ Telegram Send Error:", err.message);
             }
         } else {
-            // Fails the memory check. The bot stays completely silent.
             console.log(`🗑️ Ignored untracked sell for ${mintAddress} (Not in active holds).`);
         }
     }
@@ -203,8 +216,6 @@ ${bagStatus}
             const currentHeldBalance = await verifyWalletHoldsToken(walletAddress, mintAddress);
 
             if (currentHeldBalance > 0) {
-                
-                // NEW STEP: Add this token to the bot's memory so it watches for the sell
                 if (trackedPositions[walletAddress]) {
                     trackedPositions[walletAddress].add(mintAddress);
                 }
